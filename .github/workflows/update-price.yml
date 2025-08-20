@@ -1,0 +1,54 @@
+name: Update TWLO price
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # every 5 minutes (minimum allowed for Actions)
+  workflow_dispatch:        # allow manual runs
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Fetch TWLO price from Finnhub
+        id: fetch
+        env:
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+        run: |
+          set -e
+          mkdir -p data
+          # Call Finnhub: https://finnhub.io/api/v1/quote?symbol=TWLO&token=YOURKEY
+          # Response fields: c=current price, t=unix timestamp
+          RAW=$(curl -s "https://finnhub.io/api/v1/quote?symbol=TWLO&token=${FINNHUB_API_KEY}")
+          echo "RAW=$RAW"
+          PRICE=$(echo "$RAW" | jq -r '.c')
+          TS=$(echo "$RAW" | jq -r '.t')
+
+          if [ "$PRICE" = "null" ] || [ -z "$PRICE" ]; then
+            echo "Price missing from API response"; exit 1
+          fi
+
+          # Build the JSON file our site reads
+          ISO=$(date -u -d "@$TS" +"%Y-%m-%dT%H:%M:%SZ")
+          jq -n --arg p "$PRICE" --arg iso "$ISO" \
+            '{price: ($p|tonumber), fetched_at_iso: $iso, source: "Finnhub quote API"}' > data/price.json
+
+          cat data/price.json
+
+      - name: Commit & push if changed
+        run: |
+          set -e
+          if ! git diff --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add data/price.json
+            git commit -m "chore: update TWLO price"
+            git push
+          else
+            echo "No changes to commit."
+          fi
