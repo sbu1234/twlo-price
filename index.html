@@ -4,55 +4,169 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>TWLO Price</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></"></script>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem; }
-    .card { max-width: 520px; padding: 1.25rem 1.5rem; border: 1px solid #ddd; border-radius: 14px; box-shadow: 0 1px 8px rgba(0,0,0,.04); }
-    h1 { margin: 0 0 .5rem; font-size: 1.5rem; }
-    .price { font-size: 2.25rem; font-weight: 700; margin: .75rem 0; }
-    .meta { color: #666; font-size: .95rem; }
-    .error { color: #b00020; }
+    :root { --muted:#666; --border:#e5e5e5; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem; line-height:1.5; }
+    .container { max-width: 980px; margin: 0 auto; }
+    .card { padding: 1.25rem 1.5rem; border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 1px 8px rgba(0,0,0,.04); background:#fff; }
+    h1 { margin: 0 0 .25rem; font-size: 1.6rem; }
+    .sub { color: var(--muted); margin-bottom: .75rem; }
+    .row { display:flex; gap:1rem; align-items: center; flex-wrap: wrap; }
+    .price { font-size: 2.25rem; font-weight: 700; }
+    .badge { display:inline-block; padding:.25rem .6rem; border-radius:999px; font-size:.85rem; border:1px solid var(--border); }
+    .badge.open { background:#e9fbe9; }
+    .badge.closed { background:#f7e9ea; }
+    .meta { color: var(--muted); font-size: .95rem; }
     .updated { margin-top: .25rem; }
-    button { margin-top: 1rem; padding: .6rem 1rem; border-radius: 10px; border: 1px solid #ddd; background: #f6f6f6; cursor: pointer; }
+    .error { color: #b00020; margin-top:.5rem; }
+    button { margin-top: .75rem; padding: .55rem .9rem; border-radius: 10px; border: 1px solid var(--border); background: #f6f6f6; cursor: pointer; }
     button:hover { background: #eee; }
+    .grid { display:grid; grid-template-columns: repeat(1, 1fr); gap: 1rem; margin-top:1rem; }
+    @media (min-width: 900px) { .grid { grid-template-columns: repeat(3, 1fr); } }
+    canvas { width:100%; height:280px; }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>Twilio Inc. (TWLO)</h1>
-    <div id="price" class="price">—</div>
-    <div id="meta" class="meta">Loading latest price…</div>
-    <div class="updated meta" id="updated"></div>
-    <button id="refresh">Refresh</button>
-    <div id="err" class="error"></div>
+  <div class="container">
+    <div class="card">
+      <h1>Twilio Inc. (TWLO)</h1>
+      <div class="sub">Live price, market status, and trends</div>
+      <div class="row">
+        <div id="price" class="price">—</div>
+        <div id="mkt" class="badge">Market: —</div>
+      </div>
+      <div id="meta" class="meta">Loading latest price…</div>
+      <div class="updated meta" id="updated"></div>
+      <button id="refresh">Refresh</button>
+      <div id="err" class="error"></div>
+    </div>
+
+    <div class="grid">
+      <div class="card"><div class="sub">Day trend</div><canvas id="chartDay"></canvas></div>
+      <div class="card"><div class="sub">Week trend</div><canvas id="chartWeek"></canvas></div>
+      <div class="card"><div class="sub">Month trend</div><canvas id="chartMonth"></canvas></div>
+    </div>
   </div>
 
   <script>
-    async function loadPrice() {
+    function isMarketOpen(now = new Date(), tz = 'America/New_York') {
+      const fmt = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour12: false, weekday: 'short', hour: '2-digit', minute: '2-digit' });
+      const partsMap = new Map();
+      for (const part of fmt.formatToParts(now)) partsMap.set(part.type, part.value);
+      const wd = partsMap.get('weekday');
+      if (wd === 'Sat' || wd === 'Sun') return false;
+      const h = parseInt(partsMap.get('hour'), 10);
+      const m = parseInt(partsMap.get('minute'), 10);
+      const mins = h*60 + m;
+      return mins >= (9*60 + 30) && mins <= (16*60);
+    }
+
+    let chartDay, chartWeek, chartMonth;
+
+    function mkChart(ctx, labels, data) {
+      if (!ctx) return null;
+      return new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            label: 'Price',
+            data,
+            fill: false,
+            tension: 0.25,
+            pointRadius: 0,
+            borderWidth: 2
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: { mode: 'index', intersect: false }
+          },
+          scales: {
+            x: { ticks: { maxTicksLimit: 6 } },
+            y: { ticks: { maxTicksLimit: 6 }, beginAtZero: false }
+          }
+        }
+      });
+    }
+
+    function sliceByDays(series, days) {
+      const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+      return series.filter(pt => new Date(pt.t).getTime() >= cutoff);
+    }
+
+    function toLabel(iso) {
+      const d = new Date(iso);
+      return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    }
+
+    async function loadAll() {
       const err = document.getElementById('err');
       err.textContent = '';
+
       try {
-        const res = await fetch('./data/price.json?cacheBust=' + Date.now());
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
+        const [prRes, hiRes] = await Promise.all([
+          fetch('./data/price.json?b=' + Date.now()),
+          fetch('./data/history.json?b=' + Date.now())
+        ]);
 
-        const priceEl = document.getElementById('price');
-        const metaEl  = document.getElementById('meta');
-        const updEl   = document.getElementById('updated');
+        if (!prRes.ok) throw new Error('price.json HTTP ' + prRes.status);
+        const priceData = await prRes.json();
 
-        priceEl.textContent = (data.price != null) ? '$' + Number(data.price).toFixed(2) : '—';
-        metaEl.textContent  = data.source ? `Source: ${data.source}` : '';
-        if (data.fetched_at_iso) {
-          const d = new Date(data.fetched_at_iso);
-          updEl.textContent = `Last updated: ${d.toLocaleString()}`;
+        document.getElementById('price').textContent = (priceData.price != null) ? '$' + Number(priceData.price).toFixed(2) : '—';
+        document.getElementById('meta').textContent  = priceData.source ? `Source: ${priceData.source}` : '';
+        if (priceData.fetched_at_iso) {
+          const d = new Date(priceData.fetched_at_iso);
+          document.getElementById('updated').textContent = `Last updated: ${d.toLocaleString()}`;
+        }
+
+        const open = isMarketOpen(new Date());
+        const mkt = document.getElementById('mkt');
+        mkt.textContent = 'Market: ' + (open ? 'Open' : 'Closed');
+        mkt.classList.toggle('open', open);
+        mkt.classList.toggle('closed', !open);
+
+        if (hiRes.ok) {
+          const hist = await hiRes.json();
+          const series = Array.isArray(hist.series) ? hist.series : [];
+
+          const day = sliceByDays(series, 1);
+          const week = sliceByDays(series, 7);
+          const month = sliceByDays(series, 30);
+
+          const labelsDay = day.map(p => toLabel(p.t));
+          const labelsWeek = week.map(p => toLabel(p.t));
+          const labelsMonth = month.map(p => toLabel(p.t));
+
+          const dataDay = day.map(p => p.p);
+          const dataWeek = week.map(p => p.p);
+          const dataMonth = month.map(p => p.p);
+
+          const ctxDay = document.getElementById('chartDay').getContext('2d');
+          const ctxWeek = document.getElementById('chartWeek').getContext('2d');
+          const ctxMonth = document.getElementById('chartMonth').getContext('2d');
+
+          if (!chartDay) chartDay = mkChart(ctxDay, labelsDay, dataDay);
+          else { chartDay.data.labels = labelsDay; chartDay.data.datasets[0].data = dataDay; chartDay.update(); }
+
+          if (!chartWeek) chartWeek = mkChart(ctxWeek, labelsWeek, dataWeek);
+          else { chartWeek.data.labels = labelsWeek; chartWeek.data.datasets[0].data = dataWeek; chartWeek.update(); }
+
+          if (!chartMonth) chartMonth = mkChart(ctxMonth, labelsMonth, dataMonth);
+          else { chartMonth.data.labels = labelsMonth; chartMonth.data.datasets[0].data = dataMonth; chartMonth.update(); }
         }
       } catch (e) {
-        err.textContent = 'Failed to load price. ' + e.message;
+        err.textContent = 'Error: ' + e.message;
       }
     }
 
-    document.getElementById('refresh').addEventListener('click', loadPrice);
-    loadPrice();
-    setInterval(loadPrice, 60_000);
+    document.getElementById('refresh').addEventListener('click', loadAll);
+    loadAll();
+    setInterval(loadAll, 60_000);
   </script>
 </body>
 </html>
