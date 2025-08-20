@@ -2,7 +2,7 @@ name: Update TWLO price
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # every 5 minutes (minimum allowed for Actions)
+    - cron: "*/5 * * * *"   # every 5 minutes
   workflow_dispatch:        # allow manual runs
 
 permissions:
@@ -15,40 +15,64 @@ jobs:
       - name: Check out repo
         uses: actions/checkout@v4
 
-      - name: Fetch TWLO price from Finnhub
-        id: fetch
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Fetch TWLO price from Finnhub & build JSON files
         env:
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
         run: |
           set -e
           mkdir -p data
-          # Call Finnhub: https://finnhub.io/api/v1/quote?symbol=TWLO&token=YOURKEY
-          # Response fields: c=current price, t=unix timestamp
+
+          # 1) Call Finnhub
           RAW=$(curl -s "https://finnhub.io/api/v1/quote?symbol=TWLO&token=${FINNHUB_API_KEY}")
           echo "RAW=$RAW"
-          PRICE=$(echo "$RAW" | jq -r '.c')
-          TS=$(echo "$RAW" | jq -r '.t')
 
-          if [ "$PRICE" = "null" ] || [ -z "$PRICE" ]; then
-            echo "Price missing from API response"; exit 1
+          # 2) Extract current price; fail if missing
+          PRICE=$(echo "$RAW" | jq -r '.c')
+          if [ -z "$PRICE" ] || [ "$PRICE" = "null" ]; then
+            echo "ERROR: Price missing from API response"; exit 1
           fi
 
-          # Build the JSON file our site reads
-          ISO=$(date -u -d "@$TS" +"%Y-%m-%dT%H:%M:%SZ")
-          jq -n --arg p "$PRICE" --arg iso "$ISO" \
-            '{price: ($p|tonumber), fetched_at_iso: $iso, source: "Finnhub quote API"}' > data/price.json
+          # Use runner time as ISO stamp (simpler, robust)
+          ISO=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+          # 3) Write latest price file
+          jq -n --arg p "$PRICE" --arg iso "$ISO" \
+            '{price: ($p|tonumber), fetched_at_iso: $iso, source: "Finnhub quote API"}' \
+            > data/price.json
+          echo "WROTE data/price.json:"
           cat data/price.json
 
-      - name: Commit & push if changed
+          # 4) Update/seed rolling history (last 2000 points)
+          if [ -f data/history.json ]; then
+            HIST=$(cat data/history.json)
+          else
+            HIST='{"series":[]}'
+          fi
+
+          POINT=$(jq -n --arg iso "$ISO" --arg p "$PRICE" '{t: $iso, p: ($p|tonumber)}')
+
+          echo "$HIST" | jq --argjson point "$POINT" '
+            .series += [$point] |
+            .series |= (if length > 2000 then .[-2000:] else . end)
+          ' > data/history.json
+
+          echo "HISTORY LENGTH:"
+          jq '.series | length' data/history.json
+
+      - name: Commit & push if changed (handles untracked files)
         run: |
           set -e
-          if ! git diff --quiet; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add data/price.json
-            git commit -m "chore: update TWLO price"
-            git push
-          else
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+          if git diff --staged --quiet; then
             echo "No changes to commit."
+          else
+            git commit -m "chore: update TWLO price & history"
+            git push
           fi
+
