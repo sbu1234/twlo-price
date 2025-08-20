@@ -1,5 +1,5 @@
 {
-  "price": 101.96,
-  "fetched_at_iso": "2025-08-20T19:24:21Z",
-  "source": "Finnhub quote API"
+  "price": null,
+  "fetched_at_iso": null,
+  "source": "pending"
 }
