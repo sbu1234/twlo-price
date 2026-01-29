@@ -1,5 +1,5 @@
 {
-  "price": 123.74,
-  "fetched_at_iso": "2026-01-29T17:20:11Z",
+  "price": 123,
+  "fetched_at_iso": "2026-01-29T17:56:59Z",
   "source": "Finnhub quote API"
 }
